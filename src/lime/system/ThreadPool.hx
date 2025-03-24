@@ -1,3 +1,8 @@
+/*
+	Should fixes the slow preload assetLibraries causing from ThreadPool
+	FNF Blossom, Ralty
+*/
+
 package lime.system;
 
 import lime.app.Application;
@@ -5,10 +10,13 @@ import lime.app.Event;
 import lime.system.WorkOutput;
 import lime.utils.Log;
 #if target.threaded
+import sys.thread.Deque;
 import sys.thread.Thread;
 #elseif (cpp || webassembly)
+import cpp.vm.Deque;
 import cpp.vm.Thread;
 #elseif neko
+import neko.vm.Deque;
 import neko.vm.Thread;
 #elseif html5
 import lime._internal.backend.html5.HTML5Thread as Thread;
@@ -112,7 +120,7 @@ class ThreadPool extends WorkOutput
 
 		In single-threaded mode, this will equal `activeJobs`.
 	**/
-	public var currentThreads(get, never):Int;
+	public var currentThreads:Int = 0;
 
 	/**
 		The number of jobs actively being executed.
@@ -124,6 +132,14 @@ class ThreadPool extends WorkOutput
 		anything. In single-threaded mode, this will always be 0.
 	**/
 	public var idleThreads(get, never):Int;
+
+	/**
+		__Set this only from the main thread.__
+
+		The maximum number of jobs a live threads can handle. If this value
+		decreases, the active jobs will still be allowed to finish.
+	**/
+	public var maxThreadJobs:Int;
 
 	/**
 		__Set this only from the main thread.__
@@ -186,6 +202,7 @@ class ThreadPool extends WorkOutput
 	#if lime_threads
 	/**
 		The set of threads actively running a job.
+		The key are jobID, not threadID.
 	**/
 	private var __activeThreads:Map<Int, Thread>;
 
@@ -194,6 +211,30 @@ class ThreadPool extends WorkOutput
 		variable equal to `__idleThreads.length`.
 	**/
 	private var __idleThreads:Array<Thread>;
+
+	/**
+		All threads assigned to available ID.
+	**/
+	private var __allThreads:Map<Int, Thread>;
+
+	/**
+		WorkOutputs for Threads to send outputs to the main thread.
+	**/
+	private var __threadOutputs:Map<Int, WorkOutput>;
+
+	#if !html5
+	/**
+		Messages sent by main thread, received by the active jobs,
+		just for to remind what status they are in.
+	**/
+	private var __threadStatusInputs:Map<Int, Deque<ThreadEventType>>;
+
+	/**
+		A Map to track how much jobs is it doing currently in the thread.
+	**/
+	private var __threadJobs:Map<Int, Int>;
+	#end
+
 	#end
 
 	private var __jobQueue:JobList = new JobList();
@@ -210,7 +251,7 @@ class ThreadPool extends WorkOutput
 		`SINGLE_THREADED` in HTML5. In HTML5, `MULTI_THREADED` mode uses web
 		workers, which impose additional restrictions.
 	**/
-	public function new(minThreads:Int = 0, maxThreads:Int = 1, mode:ThreadMode = null)
+	public function new(minThreads:Int = 0, maxThreads:Int = 1, maxThreadJobs:Int = 4, mode:ThreadMode = null)
 	{
 		super(mode);
 
@@ -218,12 +259,17 @@ class ThreadPool extends WorkOutput
 
 		this.minThreads = minThreads;
 		this.maxThreads = maxThreads;
+		this.maxThreadJobs = maxThreadJobs;
 
 		#if lime_threads
 		if (this.mode == MULTI_THREADED)
 		{
 			__activeThreads = new Map();
 			__idleThreads = [];
+			__allThreads = new Map();
+			__threadOutputs = new Map();
+			__threadStatusInputs = new Map();
+			__threadJobs = new Map();
 		}
 		#end
 	}
@@ -252,12 +298,12 @@ class ThreadPool extends WorkOutput
 				var thread:Thread = __activeThreads[job.id];
 				if (idleThreads < minThreads)
 				{
-					thread.sendMessage({event: CANCEL});
+					cancelThread(thread);
 					__idleThreads.push(thread);
 				}
 				else
 				{
-					thread.sendMessage({event: EXIT});
+					exitThread(thread);
 				}
 			}
 			#end
@@ -280,7 +326,7 @@ class ThreadPool extends WorkOutput
 		// Exit idle threads if there are more than the minimum.
 		while (idleThreads > minThreads)
 		{
-			__idleThreads.pop().sendMessage({event: EXIT});
+			exitThread(__idleThreads.pop());
 		}
 		#end
 
@@ -309,7 +355,7 @@ class ThreadPool extends WorkOutput
 		var thread:Thread = __activeThreads[jobID];
 		if (thread != null)
 		{
-			thread.sendMessage({event: CANCEL});
+			cancelThread(thread);
 			__activeThreads.remove(jobID);
 			__idleThreads.push(thread);
 		}
@@ -368,6 +414,11 @@ class ThreadPool extends WorkOutput
 			Application.current.onUpdate.add(__update);
 		}
 
+		if (mode == MULTI_THREADED)
+		{
+			processJobQueues();
+		}
+
 		return job.id;
 	}
 
@@ -378,30 +429,40 @@ class ThreadPool extends WorkOutput
 		Retrieves jobs using `Thread.readMessage()`, runs them until complete,
 		and repeats.
 
-		On all targets besides HTML5, the first message must be a `WorkOutput`.
+		On all targets besides HTML5, the first messages for the thread must be a `WorkOutput`, and 'Deque<ThreadEventType>'.
+		for HTML% it's just only 'WorkOutput' for the first message.
 	**/
 	private static function __executeThread():Void
 	{
 		// @formatter:off
 		JSAsync.async({
-			var output:WorkOutput = #if html5 new WorkOutput(MULTI_THREADED) #else cast(Thread.readMessage(true), WorkOutput) #end;
-			var event:ThreadEvent = null;
+			var output:WorkOutput = cast(Thread.readMessage(true), WorkOutput);
+			#if !html5
+			var statusDeque:Deque<ThreadEventType> = cast Thread.readMessage(true);
+			#end
+			var event:ThreadEvent = null, status:ThreadEventType = null;
 
 			while (true)
 			{
-				// Get a job.
-				if (event == null)
+				if (event == null #if !html5 && status == null #end)
 				{
 					do
 					{
 						event = Thread.readMessage(true);
+						#if !html5
+						if ((status = statusDeque.pop(false)) != null) break;
+						#end
 					}
 					while (event == null || !Reflect.hasField(event, "event"));
-
-					output.resetJobProgress();
 				}
 
-				if (event.event == EXIT)
+				if (event != null && event.event != WORK)
+				{
+					status = event.event;
+					event = null;
+				}
+
+				if (status == EXIT)
 				{
 					// Quit working.
 					#if html5
@@ -410,7 +471,9 @@ class ThreadPool extends WorkOutput
 					return;
 				}
 
-				if (event.event != WORK || event.job == null)
+				status = null;
+
+				if (event == null || event.job == null)
 				{
 					// Go idle.
 					event = null;
@@ -423,10 +486,14 @@ class ThreadPool extends WorkOutput
 				var interruption:Dynamic = null;
 				try
 				{
-					while (!output.__jobComplete.value && (interruption = Thread.readMessage(false)) == null)
+					while (!output.__jobComplete.value #if html5 && (interruption = Thread.readMessage(false)) == null #end)
 					{
 						output.workIterations.value = output.workIterations.value + 1;
 						event.job.doWork.dispatch(event.job.state, output);
+						#if !html5
+						if (interruption == null) interruption = Thread.readMessage(false);
+						if ((status = statusDeque.pop(false)) != null) break;
+						#end
 					}
 				}
 				catch (e:#if (haxe_ver >= 4.1) haxe.Exception #else Dynamic #end)
@@ -436,21 +503,8 @@ class ThreadPool extends WorkOutput
 
 				output.activeJob = null;
 
-				if (interruption == null || output.__jobComplete.value)
-				{
-					// Work is done; wait for more.
-					event = interruption;
-				}
-				else if (Reflect.hasField(interruption, "event"))
-				{
-					// Work on the new job.
-					event = interruption;
-					output.resetJobProgress();
-				}
-				else
-				{
-					// Ignore interruption and keep working.
-				}
+				event = interruption;
+				output.resetJobProgress();
 
 				// Do it all again.
 			}
@@ -469,18 +523,10 @@ class ThreadPool extends WorkOutput
 	}
 
 	/**
-		Schedules (in multi-threaded mode) or runs (in single-threaded mode) the
-		job queue, then processes incoming events.
+		Process the available job queues.
 	**/
-	private function __update(deltaTime:Int):Void
-	{
-		if (!isMainThread())
-		{
-			return;
-		}
-
-		// Process the queue.
-		while (__jobQueue.length > 0 && activeJobs < maxThreads)
+	private function processJobQueues() {
+		while (__jobQueue.length > 0 && activeJobs < maxThreads #if !html5 * maxThreadJobs #end)
 		{
 			var job:JobData = __jobQueue.pop();
 
@@ -494,9 +540,18 @@ class ThreadPool extends WorkOutput
 				job.doWork.makePortable();
 				#end
 
-				var thread:Thread = __idleThreads.length == 0 ? createThread(__executeThread) : __idleThreads.pop();
-				__activeThreads[job.id] = thread;
-				thread.sendMessage({event: WORK, job: job});
+				var thread:Thread;
+				if (currentThreads < maxThreads)
+				{
+					thread = createThread(__executeThread);
+				}
+				else
+				{
+					thread = __idleThreads.pop() ?? getFreeThread();
+				}
+
+				incrementThreadJobs(thread);
+				(__activeThreads[job.id] = thread).sendMessage({event: WORK, job: job});
 			}
 			#end
 		}
@@ -536,6 +591,20 @@ class ThreadPool extends WorkOutput
 
 			activeJob = null;
 		}
+	}
+
+	/**
+		Schedules (in multi-threaded mode) or runs (in single-threaded mode) the
+		job queue, then processes incoming events.
+	**/
+	private function __update(deltaTime:Float):Void
+	{
+		if (!isMainThread())
+		{
+			return;
+		}
+
+		processJobQueues();
 
 		var threadEvent:ThreadEvent;
 		while ((threadEvent = __jobOutput.pop(false)) != null)
@@ -584,17 +653,31 @@ class ThreadPool extends WorkOutput
 					{
 						var thread:Thread = __activeThreads[activeJob.id];
 						__activeThreads.remove(activeJob.id);
+						decrementThreadJobs(thread);
 
-						if (currentThreads > maxThreads || __jobQueue.length == 0 && currentThreads > minThreads)
-						{
-							thread.sendMessage({event: EXIT});
-						}
-						else
+						if (__jobQueue.length > 0)
 						{
 							__idleThreads.push(thread);
+							processJobQueues();
+						}
+						else if (getThreadJobs(thread) == 0)
+						{
+							if (currentThreads > maxThreads || currentThreads > minThreads)
+							{
+								exitThread(thread);
+							}
+							else
+							{
+								__idleThreads.push(thread);
+							}
 						}
 					}
+					else
 					#end
+					if (__jobQueue.length > 0)
+					{
+						processJobQueues();
+					}
 
 				default:
 			}
@@ -609,12 +692,153 @@ class ThreadPool extends WorkOutput
 	}
 
 	#if lime_threads
+	/**
+		Send the thread what status it should be on.
+	**/
+	private function cancelThread(thread:Thread)
+	{
+		#if html5
+		thread.sendMessage({event: CANCEL});
+		#else
+		for (threadID => other in __allThreads)
+		{
+			if (other == thread)
+			{
+				__threadStatusInputs[threadID].add(CANCEL);
+				thread.sendMessage(null);
+				break;
+			}
+		}
+		#end
+	}
+
+	/**
+		Sends the thread to immediately exit and remove the thread from __allThreads.
+	**/
+	private function exitThread(thread:Thread)
+	{
+		#if html5
+		thread.sendMessage({event: EXIT});
+		currentThreads--;
+		#else
+		for (threadID => other in __allThreads)
+		{
+			if (other == thread)
+			{
+				currentThreads--;
+				__threadStatusInputs[threadID].add(EXIT);
+				__allThreads.remove(threadID);
+				__threadOutputs.remove(threadID);
+				#if !html5
+				__threadStatusInputs.remove(threadID);
+				__threadJobs.remove(threadID);
+				#end
+				thread.sendMessage(null);
+				break;
+			}
+		}
+		#end
+	}
+
+	/**
+		An helper function to get a thread that have the least amount of jobs
+		it's doing.
+	**/
+	private function getFreeThread():Thread
+	{
+		#if !html5
+		var gotThreadID:Int = -1;
+		for (threadID => thread in __allThreads)
+		{
+			if (gotThreadID == -1)
+			{
+				gotThreadID = threadID;
+				continue;
+			}
+			else if (__threadJobs[gotThreadID] > __threadJobs[threadID])
+			{
+				gotThreadID = threadID;
+			}
+		}
+		return __allThreads[gotThreadID];
+		#else
+		return null;
+		#end
+	}
+
+	/**
+		An helper function to get how much jobs is the thread doing.
+	**/
+	private function getThreadJobs(thread:Thread):Int
+	{
+		#if !html5
+		for (threadID => other in __allThreads)
+		{
+			if (other == thread)
+			{
+				return __threadJobs[threadID];
+			}
+		}
+		#end
+		return 0;
+	}
+
+	/**
+		An helper function to increment how much jobs is the thread doing.
+	**/
+	private function incrementThreadJobs(thread:Thread)
+	{
+		#if !html5
+		for (threadID => other in __allThreads)
+		{
+			if (other == thread)
+			{
+				__threadJobs[threadID]++;
+				break;
+			}
+		}
+		#end
+	}
+
+	/**
+		An helper function to decrement how much jobs is the thread doing.
+	**/
+	private function decrementThreadJobs(thread:Thread)
+	{
+		#if !html5
+		for (threadID => other in __allThreads)
+		{
+			if (other == thread)
+			{
+				__threadJobs[threadID]--;
+				break;
+			}
+		}
+		#end
+	}
+
 	private override function createThread(executeThread:WorkFunction<Void->Void>):Thread
 	{
-		var thread:Thread = super.createThread(executeThread);
+		var threadID:Int = -1;
+		for (i in 0...maxThreads)
+		{
+			if (!__allThreads.exists(i))
+			{
+				threadID = i;
+				break;
+			}
+		}
+		if (threadID == -1) return null;
+		currentThreads++;
+
+		var thread:Thread = __allThreads[threadID] = super.createThread(executeThread);
+		thread.sendMessage(__threadOutputs[threadID] = new WorkOutput(MULTI_THREADED));
+		thread.sendMessage(__threadStatusInputs[threadID] = new Deque());
+
 		#if !html5
-		thread.sendMessage(this);
+		__threadJobs[threadID] = 0;
 		#end
+		__threadOutputs[threadID].__jobOutput = __jobOutput;
 
 		return thread;
 	}
@@ -630,11 +854,6 @@ class ThreadPool extends WorkOutput
 	private inline function get_idleThreads():Int
 	{
 		return #if lime_threads __idleThreads.length #else 0 #end;
-	}
-
-	private inline function get_currentThreads():Int
-	{
-		return activeJobs + idleThreads;
 	}
 
 	private function get_doWork():PseudoEvent
