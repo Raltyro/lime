@@ -1,8 +1,3 @@
-/*
-	Should fixes the slow preload assetLibraries causing from ThreadPool
-	FNF Blossom, Ralty
-*/
-
 package lime.system;
 
 import lime.app.Application;
@@ -545,9 +540,9 @@ class ThreadPool extends WorkOutput
 				{
 					thread = createThread(__executeThread);
 				}
-				else
+				else if ((thread = __idleThreads.pop()) == null)
 				{
-					thread = __idleThreads.pop() ?? getFreeThread();
+					thread = getFreeThread();
 				}
 
 				incrementThreadJobs(thread);
