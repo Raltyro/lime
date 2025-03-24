@@ -1,6 +1,5 @@
 package lime.media;
 
-import lime.system.System;
 import haxe.io.Bytes;
 import haxe.io.Path;
 import lime._internal.backend.native.NativeCFFI;
@@ -22,13 +21,6 @@ import js.html.Audio;
 import flash.media.Sound;
 import flash.net.URLRequest;
 #end
-#if cpp
-import cpp.vm.Gc;
-#elseif hl
-import hl.Gc;
-#elseif neko
-import neko.vm.Gc;
-#end
 
 @:access(lime._internal.backend.native.NativeCFFI)
 @:access(lime.utils.Assets)
@@ -39,19 +31,48 @@ import neko.vm.Gc;
 @:fileXml('tags="haxe,release"')
 @:noDebug
 #end
+
+/**
+	The `AudioBuffer` class represents a buffer of audio data that can be played back using an `AudioSource`. 
+	It supports a variety of audio formats and platforms, providing a consistent API for loading and managing audio data.
+
+	Depending on the platform, the audio backend may differ, but the class provides a unified interface for accessing 
+	audio data, whether it's stored in memory, loaded from a file, or streamed.
+
+	@see lime.media.AudioSource
+**/
 class AudioBuffer
 {
+	/**
+		The number of bits per sample in the audio data.
+	**/
 	public var bitsPerSample:Int;
+
+	/**
+		The number of audio channels (e.g., 1 for mono, 2 for stereo).
+	**/
 	public var channels:Int;
+
+	/**
+		The raw audio data stored as a `UInt8Array`.
+	**/
 	public var data:UInt8Array;
+
+	/**
+		The sample rate of the audio data, in Hz.
+	**/
 	public var sampleRate:Int;
+
+	/**
+		The source of the audio data. This can be an `Audio`, `Sound`, `Howl`, or other platform-specific object.
+	**/
 	public var src(get, set):Dynamic;
 
 	@:noCompletion private var __srcAudio:#if (js && html5) Audio #else Dynamic #end;
 	@:noCompletion private var __srcBuffer:#if lime_cffi ALBuffer #else Dynamic #end;
 	@:noCompletion private var __srcCustom:Dynamic;
 	@:noCompletion private var __srcHowl:#if lime_howlerjs Howl #else Dynamic #end;
-	@:noCompletion private var __srcSound: Dynamic;
+	@:noCompletion private var __srcSound:#if flash Sound #else Dynamic #end;
 	@:noCompletion private var __srcVorbisFile:#if lime_vorbis VorbisFile #else Dynamic #end;
 
 	#if commonjs
@@ -65,19 +86,27 @@ class AudioBuffer
 	}
 	#end
 
+	/**
+		Creates a new, empty `AudioBuffer` instance.
+	**/
 	public function new() {}
 
-
+	/**
+		Disposes of the resources used by this `AudioBuffer`, such as unloading any associated audio data.
+	**/
 	public function dispose():Void
 	{
 		#if (js && html5 && lime_howlerjs)
 		__srcHowl.unload();
 		#end
-		#if lime_cffi
-		AL.deleteBuffer(__srcBuffer);
-		#end
 	}
 
+	/**
+		Creates an `AudioBuffer` from a Base64-encoded string.
+
+		@param base64String The Base64-encoded audio data.
+		@return An `AudioBuffer` instance with the decoded audio data.
+	**/
 	public static function fromBase64(base64String:String):AudioBuffer
 	{
 		if (base64String == null) return null;
@@ -124,6 +153,12 @@ class AudioBuffer
 		return null;
 	}
 
+	/**
+		Creates an `AudioBuffer` from a `Bytes` object.
+
+		@param bytes The `Bytes` object containing the audio data.
+		@return An `AudioBuffer` instance with the decoded audio data.
+	**/
 	public static function fromBytes(bytes:Bytes):AudioBuffer
 	{
 		if (bytes == null) return null;
@@ -157,6 +192,12 @@ class AudioBuffer
 		return null;
 	}
 
+	/**
+		Creates an `AudioBuffer` from a file.
+
+		@param path The file path to the audio data.
+		@return An `AudioBuffer` instance with the audio data loaded from the file.
+	**/
 	public static function fromFile(path:String):AudioBuffer
 	{
 		if (path == null) return null;
@@ -208,6 +249,12 @@ class AudioBuffer
 		#end
 	}
 
+	/**
+		Creates an `AudioBuffer` from an array of file paths.
+
+		@param paths An array of file paths to search for audio data.
+		@return An `AudioBuffer` instance with the audio data loaded from the first valid file found.
+	**/
 	public static function fromFiles(paths:Array<String>):AudioBuffer
 	{
 		#if (js && html5 && lime_howlerjs)
@@ -233,7 +280,14 @@ class AudioBuffer
 		#end
 	}
 
+	/**
+		Creates an `AudioBuffer` from a `VorbisFile`.
+
+		@param vorbisFile The `VorbisFile` object containing the audio data.
+		@return An `AudioBuffer` instance with the decoded audio data.
+	**/
 	#if lime_vorbis
+		
 	public static function fromVorbisFile(vorbisFile:VorbisFile):AudioBuffer
 	{
 		if (vorbisFile == null) return null;
@@ -255,6 +309,12 @@ class AudioBuffer
 	}
 	#end
 
+	/**
+		Asynchronously loads an `AudioBuffer` from a file.
+
+		@param path The file path to the audio data.
+		@return A `Future` that resolves to the loaded `AudioBuffer`.
+	**/
 	public static function loadFromFile(path:String):Future<AudioBuffer>
 	{
 		#if (flash || (js && html5))
@@ -264,7 +324,19 @@ class AudioBuffer
 
 		if (audioBuffer != null)
 		{
-			#if (js && html5 && lime_howlerjs)
+			#if flash
+			audioBuffer.__srcSound.addEventListener(flash.events.Event.COMPLETE, function(event)
+			{
+				promise.complete(audioBuffer);
+			});
+
+			audioBuffer.__srcSound.addEventListener(flash.events.ProgressEvent.PROGRESS, function(event)
+			{
+				promise.progress(Std.int(event.bytesLoaded), Std.int(event.bytesTotal));
+			});
+
+			audioBuffer.__srcSound.addEventListener(flash.events.IOErrorEvent.IO_ERROR, promise.error);
+			#elseif (js && html5 && lime_howlerjs)
 			if (audioBuffer != null)
 			{
 				audioBuffer.__srcHowl.on("load", function()
@@ -307,11 +379,17 @@ class AudioBuffer
 		#end
 	}
 
+	/**
+		Asynchronously loads an `AudioBuffer` from multiple files.
+
+		@param paths An array of file paths to search for audio data.
+		@return A `Future` that resolves to the loaded `AudioBuffer`.
+	**/
 	public static function loadFromFiles(paths:Array<String>):Future<AudioBuffer>
 	{
+		#if (js && html5 && lime_howlerjs)
 		var promise = new Promise<AudioBuffer>();
 
-		#if (js && html5 && lime_howlerjs)
 		var audioBuffer = AudioBuffer.fromFiles(paths);
 
 		if (audioBuffer != null)
@@ -332,11 +410,11 @@ class AudioBuffer
 		{
 			promise.error(null);
 		}
-		#else
-		promise.completeWith(new Future<AudioBuffer>(function() return fromFiles(paths), true));
-		#end
 
 		return promise.future;
+		#else
+		return new Future(fromFiles.bind(paths), true);
+		#end
 	}
 
 	private static function __getCodec(bytes:Bytes):String

@@ -718,7 +718,8 @@ namespace lime {
 					pos->v.i = position;
 
 					curl_gc_mutex.Unlock ();
-					length = *((int*)writeCallback->Call (bytes, pos));
+					vdynamic* _length = (vdynamic*)writeCallback->Call (bytes, pos);
+					length = (_length != NULL ? _length->v.i : 0);
 					curl_gc_mutex.Lock ();
 
 					if (length == CURL_WRITEFUNC_PAUSE) {
@@ -749,7 +750,8 @@ namespace lime {
 			ulnow->v.d = progress->ulnow;
 
 			curl_gc_mutex.Unlock ();
-			code = *((int*)progressCallback->Call (dltotal, dlnow, ultotal, ulnow));
+			vdynamic* _code = (vdynamic*)progressCallback->Call (dltotal, dlnow, ultotal, ulnow);
+			code = (_code != NULL ? _code->v.i : 0);
 			curl_gc_mutex.Lock ();
 
 			if (code != 0) { // CURLE_OK
@@ -776,7 +778,8 @@ namespace lime {
 			ulnow->v.i = xferInfo->ulnow;
 
 			curl_gc_mutex.Unlock ();
-			code = *((int*)xferInfoCallback->Call (dltotal, dlnow, ultotal, ulnow));
+			vdynamic* _code = (vdynamic*)xferInfoCallback->Call (dltotal, dlnow, ultotal, ulnow);
+			code = (_code != NULL ? _code->v.i : 0);
 			curl_gc_mutex.Lock ();
 
 			if (code != 0) {
@@ -1071,6 +1074,11 @@ namespace lime {
 		writeBufferPosition[handle] = 0;
 		writeBufferSize[handle] = 0;
 
+		CURLcode setopt_result = curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+		if(setopt_result != CURLE_OK) {
+			printf("Failed to set CURLOPT_ACCEPT_ENCODING: %s\n", curl_easy_strerror(setopt_result));
+		}
+
 		curl_gc_mutex.Unlock ();
 
 		return handle;
@@ -1121,6 +1129,11 @@ namespace lime {
 		writeBuffers[handle] = NULL;
 		writeBufferPosition[handle] = 0;
 		writeBufferSize[handle] = 0;
+
+		CURLcode setopt_result = curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+		if(setopt_result != CURLE_OK) {
+			printf("Failed to set CURLOPT_ACCEPT_ENCODING: %s\n", curl_easy_strerror(setopt_result));
+		}
 
 		curl_gc_mutex.Unlock ();
 
@@ -1706,7 +1719,7 @@ namespace lime {
 
 				}
 
-				progressCallbacks[handle] = new ValuePointer (parameter);;
+				progressCallbacks[handle] = new ValuePointer (parameter);
 				progressValues[handle] = new CURL_Progress ();
 
 				code = curl_easy_setopt (easy_handle, type, progress_callback);

@@ -262,22 +262,7 @@ class TVOSPlatform extends PlatformTarget
 		context.IOS_COMPILER = project.config.getString("tvos.compiler", "clang");
 		context.CPP_BUILD_LIBRARY = project.config.getString("cpp.buildLibrary", "hxcpp");
 
-		var json = Json.parse(File.getContent(Haxelib.getPath(new Haxelib("hxcpp"), true) + "/haxelib.json"));
-
-		var version = Std.string(json.version);
-		var versionSplit = version.split(".");
-
-		while (versionSplit.length > 2)
-			versionSplit.pop();
-
-		if (Std.parseFloat(versionSplit.join(".")) > 3.1)
-		{
-			context.CPP_LIBPREFIX = "lib";
-		}
-		else
-		{
-			context.CPP_LIBPREFIX = "";
-		}
+		context.CPP_CACHE_WORKAROUND = "unset HXCPP_COMPILE_CACHE;";
 
 		context.IOS_LINKER_FLAGS = ["-stdlib=libc++"].concat(project.config.getArrayString("tvos.linker-flags"));
 		context.IOS_NON_EXEMPT_ENCRYPTION = project.config.getBool("tvos.non-exempt-encryption", true);
@@ -371,7 +356,12 @@ class TVOSPlatform extends PlatformTarget
 	{
 		var path = targetDirectory + "/" + project.app.file + "/haxe/Build.hxml";
 
-		if (FileSystem.exists(path))
+		// try to use the existing .hxml file. however, if the project file was
+		// modified more recently than the .hxml, then the .hxml cannot be
+		// considered valid anymore. it may cause errors in editors like vscode.
+		if (FileSystem.exists(path)
+			&& (project.projectFilePath == null || !FileSystem.exists(project.projectFilePath)
+				|| (FileSystem.stat(path).mtime.getTime() > FileSystem.stat(project.projectFilePath).mtime.getTime())))
 		{
 			return File.getContent(path);
 		}
@@ -628,7 +618,7 @@ class TVOSPlatform extends PlatformTarget
 						fileName = "lib" + fileName;
 					}
 
-					System.copyIfNewer(dependency.path, projectDirectory + "/lib/" + arch + "/" + fileName);
+					copyIfNewer(dependency.path, projectDirectory + "/lib/" + arch + "/" + fileName);
 				}
 			}
 		}
