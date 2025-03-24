@@ -82,7 +82,7 @@ class AudioSource
 		@param length The length of the audio to play, in milliseconds. If `null`, the full buffer is used.
 		@param loops The number of times to loop the audio. `0` means no looping.
 	**/
-	public function new(buffer:AudioBuffer = null, offset:Float = 0, length:Null<Int> = null, loops:Float = 0)
+	public function new(buffer:AudioBuffer = null, offset:Float = 0, length:Null<Int> = null, loops:Int = 0)
 	{
 		this.buffer = buffer;
 		this.offset = offset;
