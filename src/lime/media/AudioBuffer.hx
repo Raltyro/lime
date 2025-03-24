@@ -97,7 +97,19 @@ class AudioBuffer
 	public function dispose():Void
 	{
 		#if (js && html5 && lime_howlerjs)
-		__srcHowl.unload();
+		if (__srcHowl != null) __srcHowl.unload();
+		__srcHowl = null;
+		#end
+		#if lime_cffi
+		if (__srcBuffer != null) AL.deleteBuffer(__srcBuffer);
+		__srcBuffer = null;
+		#end
+		#if lime_vorbis
+		if (__srcVorbisFile != null) {
+			__srcVorbisFile.clear();
+			@:privateAccess __srcVorbisFile.handle = null;
+		}
+		__srcVorbisFile = null;
 		#end
 	}
 
@@ -198,7 +210,7 @@ class AudioBuffer
 		@param path The file path to the audio data.
 		@return An `AudioBuffer` instance with the audio data loaded from the file.
 	**/
-	public static function fromFile(path:String):AudioBuffer
+	public static function fromFile(path:String #if (js && html5 && lime_howlerjs), ?howlHtml5 = false #end):AudioBuffer
 	{
 		if (path == null) return null;
 
@@ -208,7 +220,7 @@ class AudioBuffer
 		#if force_html5_audio
 		audioBuffer.__srcHowl = new Howl({src: [path], html5: true, preload: false});
 		#else
-		audioBuffer.__srcHowl = new Howl({src: [path], preload: false});
+		audioBuffer.__srcHowl = new Howl({src: [path], html5: howlHtml5, preload: false});
 		#end
 
 		return audioBuffer;
@@ -228,6 +240,9 @@ class AudioBuffer
 		var audioBuffer = new AudioBuffer();
 		audioBuffer.data = new UInt8Array(Bytes.alloc(0));
 
+		//audioBuffer = NativeCFFI.lime_audio_load_file(path, audioBuffer);
+		//if (audioBuffer != null) audioBuffer.initBuffer();
+		//return audioBuffer;
 		return NativeCFFI.lime_audio_load_file(path, audioBuffer);
 		#else
 		var data:Dynamic = NativeCFFI.lime_audio_load_file(path, null);
@@ -239,6 +254,7 @@ class AudioBuffer
 			audioBuffer.channels = data.channels;
 			audioBuffer.data = new UInt8Array(@:privateAccess new Bytes(data.data.length, data.data.b));
 			audioBuffer.sampleRate = data.sampleRate;
+			//audioBuffer.initBuffer();
 			return audioBuffer;
 		}
 
@@ -255,7 +271,7 @@ class AudioBuffer
 		@param paths An array of file paths to search for audio data.
 		@return An `AudioBuffer` instance with the audio data loaded from the first valid file found.
 	**/
-	public static function fromFiles(paths:Array<String>):AudioBuffer
+	public static function fromFiles(paths:Array<String> #if (js && html5 && lime_howlerjs), ?howlHtml5 = false #end):AudioBuffer
 	{
 		#if (js && html5 && lime_howlerjs)
 		var audioBuffer = new AudioBuffer();
@@ -263,7 +279,7 @@ class AudioBuffer
 		#if force_html5_audio
 		audioBuffer.__srcHowl = new Howl({src: paths, html5: true, preload: false});
 		#else
-		audioBuffer.__srcHowl = new Howl({src: paths, preload: false});
+		audioBuffer.__srcHowl = new Howl({src: paths, html5: howlHtml5, preload: false});
 		#end
 
 		return audioBuffer;
