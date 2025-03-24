@@ -1,11 +1,5 @@
 name: CI
-on:
-  # Triggers the workflow on push or pull request events but only for the skibidi branch
-  push:
-    branches: [develop]
-  pull_request:
-    branches: [develop]
-  workflow_dispatch:
+on: [push, workflow_dispatch]
 
 env:
   HAXE_VERSION: 4.3.6
