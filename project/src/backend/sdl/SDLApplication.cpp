@@ -2,6 +2,8 @@
 #include "SDLGamepad.h"
 #include "SDLJoystick.h"
 #include <system/System.h>
+#include <thread>
+#include <cmath>
 
 #ifdef HX_MACOS
 #include <CoreFoundation/CoreFoundation.h>
@@ -22,14 +24,16 @@ namespace lime {
 	std::map<int, std::map<int, int> > gamepadsAxisMap;
 	bool inBackground = false;
 
-	double lastUpdateEvent;
-	double lastScheduledTicks;
-
 	double performanceFrequency = 0.0;
 	double performanceCounter = 0.0;
 
-	double fps = 0.0;
-	double lastRenderDuration = 0.0;
+	#if defined(ANDROID) || defined (IPHONE)
+	SDL_SensorID gyroscopeSensorID = -1;
+	SDL_Sensor* gyroscopeSensor = nullptr;
+
+	SDL_SensorID accelerometerSensorID = -1;
+	SDL_Sensor* accelerometerSensor = nullptr;
+	#endif
 
 	SDLApplication::SDLApplication () {
 		Uint32 initFlags = SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_TIMER | SDL_INIT_JOYSTICK;
@@ -68,7 +72,15 @@ namespace lime {
 		TouchEvent touchEvent;
 		WindowEvent windowEvent;
 
+		#if defined(ANDROID) || defined (IPHONE)
+		SDL_EventState (SDL_SENSORUPDATE, SDL_ENABLE);
+		#endif
+
 		SDL_EventState (SDL_DROPFILE, SDL_ENABLE);
+
+		#if defined(ANDROID) || defined (IPHONE)
+		InitializeSensors ();
+		#endif
 		SDLJoystick::Init ();
 
 		#ifdef HX_MACOS
@@ -86,10 +98,41 @@ namespace lime {
 
 	}
 
+	#if defined(ANDROID) || defined (IPHONE)
+	void SDLApplication::InitializeSensors () {
+
+		gyroscopeSensorID = System::GetFirstGyroscopeSensorId ();
+
+		if (gyroscopeSensorID > 0)
+			gyroscopeSensor = SDL_SensorOpen (gyroscopeSensorID);
+
+		accelerometerSensorID = System::GetFirstAccelerometerSensorId ();
+
+		if (gyroscopeSensorID > 0)
+			accelerometerSensor = SDL_SensorOpen (gyroscopeSensorID);
+
+	}
+	#endif
 
 	SDLApplication::~SDLApplication () {
 
+		#if defined(ANDROID) || defined(IPHONE)
+		if (gyroscopeSensor) {
 
+			SDL_SensorClose (gyroscopeSensor);
+			gyroscopeSensor = nullptr;
+			gyroscopeSensorID = -1;
+
+		}
+
+		if (accelerometerSensor) {
+
+			SDL_SensorClose (accelerometerSensor);
+			accelerometerSensor = nullptr;
+			accelerometerSensorID = -1;
+
+		}
+		#endif
 
 	}
 
@@ -129,9 +172,24 @@ namespace lime {
 	}
 	void busyWait(double ms) {
 		const double start = getTime();
-		while(getTime() - start < ms) {
-			continue;
+		while (getTime() - start < ms) {
+			std::this_thread::yield();
 		}
+	}
+
+	void coolSleep(double sleepFor) {
+		double dt = 0.0;
+		double start = getTime();
+		double threshold = sleepFor - (0.9765625 * 2.2);
+
+		while ((dt = getTime() - start) < threshold)
+			SDL_Delay(1);
+		
+		double end = getTime();
+		
+		double remainder = (end - start) - dt;
+		if (remainder > 0)
+			busyWait(remainder);
 	}
 
 	void SDLApplication::HandleEvent (SDL_Event* event) {
@@ -149,15 +207,21 @@ namespace lime {
 
 				if (!inBackground) {
 					applicationEvent.type = UPDATE;
-					applicationEvent.deltaTime = (currentUpdate - lastUpdate) / performanceFrequency * 1e+3;
-
-					lastUpdate = currentUpdate;
-					ApplicationEvent::Dispatch (&applicationEvent);
-
+					applicationEvent.deltaTime = currentUpdate - lastUpdate;
+					
 					double start = getTime();
+
+					ApplicationEvent::Dispatch (&applicationEvent);
 					RenderEvent::Dispatch (&renderEvent);
 
-					lastRenderDuration = getTime() - start;
+					double end = getTime();
+					double remainder = end - start;
+
+					if (framePeriod > 0.0) {
+						double sleepDuration = framePeriod - remainder;
+						if (sleepDuration > 0)
+							coolSleep(sleepDuration);
+					}
 				}
 
 				break;
@@ -208,18 +272,17 @@ namespace lime {
 				ProcessTouchEvent (event);
 				break;
 
+			#if defined(ANDROID) || defined (IPHONE)
+			case SDL_SENSORUPDATE:
+
+				ProcessSensorEvent (event);
+				break;
+			
+			#endif
+
 			case SDL_JOYAXISMOTION:
 
-				if (SDLJoystick::IsAccelerometer (event->jaxis.which)) {
-
-					ProcessSensorEvent (event);
-
-				} else {
-
-					ProcessJoystickEvent (event);
-
-				}
-
+				ProcessJoystickEvent (event);
 				break;
 
 			case SDL_JOYBALLMOTION:
@@ -343,10 +406,7 @@ namespace lime {
 		active = true;
 		
 		double ticks = (double)SDL_GetPerformanceCounter();
-
 		lastUpdate = ticks;
-		lastUpdateEvent = lastUpdate;
-		lastScheduledTicks = ticks;
 	}
 
 
@@ -664,26 +724,35 @@ namespace lime {
 	}
 
 
-	void SDLApplication::ProcessSensorEvent (SDL_Event* event) {
+	#if defined(ANDROID) || defined (IPHONE)
+	void SDLApplication::ProcessSensorEvent(SDL_Event* event) {
 
 		if (SensorEvent::callback) {
 
-			double value = event->jaxis.value / 32767.0f;
+			if (event->sensor.which == gyroscopeSensorID) {
 
-			switch (event->jaxis.axis) {
+				sensorEvent.type = SENSOR_GYROSCOPE;
+				sensorEvent.id = event->sensor.which;
+				sensorEvent.x = event->sensor.data[0];
+				sensorEvent.y = event->sensor.data[1];
+				sensorEvent.z = event->sensor.data[2];
+				SensorEvent::Dispatch(&sensorEvent);
 
-				case 0: sensorEvent.x = value; break;
-				case 1: sensorEvent.y = value; break;
-				case 2: sensorEvent.z = value; break;
-				default: break;
+			} else if (event->sensor.which == accelerometerSensorID) {
+
+				sensorEvent.type = SENSOR_ACCELEROMETER;
+				sensorEvent.id = event->sensor.which;
+				sensorEvent.x = event->sensor.data[0];
+				sensorEvent.y = event->sensor.data[1];
+				sensorEvent.z = event->sensor.data[2];
+				SensorEvent::Dispatch(&sensorEvent);
 
 			}
-
-			SensorEvent::Dispatch (&sensorEvent);
 
 		}
 
 	}
+	#endif
 
 
 	void SDLApplication::ProcessTextEvent (SDL_Event* event) {
@@ -828,12 +897,10 @@ namespace lime {
 		if (frameRate > 0) {
 
 			framePeriod = 1000.0 / frameRate;
-			fps = frameRate;
 
 		} else {
 
 			framePeriod = 0.0;
-			fps = 0.0;
 
 		}
 
@@ -854,61 +921,30 @@ namespace lime {
 
 
 	bool SDLApplication::Update () {
-		currentUpdate = SDL_GetPerformanceCounter();
+		// i have no idea why this makes fps
+		// more consistent, but i am happy regardless.
+		lastUpdate = currentUpdate;
+		currentUpdate = getTime();
 
+		double dt = currentUpdate - lastUpdate;
+
+		double dtLimit = framePeriod * 4;
+		if (dt > dtLimit)
+			dt = dtLimit;
+		
+		nextUpdate += dt;
+
+		if(nextUpdate >= framePeriod) {
+			PushUpdate();
+			nextUpdate -= framePeriod;
+		}
 		SDL_Event event;
-		event.type = -1;
-
 		while (SDL_PollEvent (&event)) {
-
 			HandleEvent (&event);
 			event.type = -1;
 			if (!active)
 				return active;
 		}
-
-		double curTicks = currentUpdate;
-		if(fps > 0.0) {
-			int ticks_to_wait = static_cast<int>(performanceFrequency / fps);
-
-			bool done = false;
-
-			do
-			{
-				curTicks = (double)SDL_GetPerformanceCounter();
-				int ticks_passed = static_cast<int>(curTicks-lastScheduledTicks);
-
-				int ticks_left = ticks_to_wait - ticks_passed;
-
-				if (curTicks < lastScheduledTicks || ticks_passed >= ticks_to_wait)
-					done = true;
-
-				if (!done)
-				{
-					int scheduled_ticks = static_cast<int>((performanceFrequency * 2) * 1e-3);
-
-					if (ticks_left > scheduled_ticks)
-						SDL_Delay(1);
-					else
-					{
-						double curTime = (double)SDL_GetPerformanceCounter();
-
-						do {
-							curTicks = (double)SDL_GetPerformanceCounter();
-							SDL_Delay(0);
-						}
-						while(curTicks-curTime < ticks_left);
-					}
-
-				}
-			}
-			while(!done);
-		}
-		PushUpdate();
-
-		lastUpdate = currentUpdate;
-		lastScheduledTicks = curTicks;
-
 		return active;
 	}
 
