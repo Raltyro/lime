@@ -105,10 +105,7 @@ class AudioBuffer
 		__srcBuffer = null;
 		#end
 		#if lime_vorbis
-		if (__srcVorbisFile != null) {
-			__srcVorbisFile.clear();
-			@:privateAccess __srcVorbisFile.handle = null;
-		}
+		if (__srcVorbisFile != null) __srcVorbisFile.clear();
 		__srcVorbisFile = null;
 		#end
 	}
@@ -131,7 +128,7 @@ class AudioBuffer
 		}
 
 		var audioBuffer = new AudioBuffer();
-		audioBuffer.src = new Howl({src: [base64String], html5: true, preload: false});
+		audioBuffer.src = new Howl({src: [base64String], preload: false});
 		return audioBuffer;
 		#elseif (lime_cffi && !macro)
 		#if !cs
@@ -177,10 +174,14 @@ class AudioBuffer
 
 		#if (js && html5 && lime_howlerjs)
 		var audioBuffer = new AudioBuffer();
-		audioBuffer.src = new Howl({src: ["data:" + __getCodec(bytes) + ";base64," + Base64.encode(bytes)], html5: true, preload: false});
+		audioBuffer.src = new Howl({src: ["data:" + __getCodec(bytes) + ";base64," + Base64.encode(bytes)], preload: false});
 
 		return audioBuffer;
 		#elseif (lime_cffi && !macro)
+		#if lime_vorbis
+		var vorbisFile = VorbisFile.fromBytes(bytes);
+		if (vorbisFile != null) return fromVorbisFile(vorbisFile);
+		#end
 		#if !cs
 		var audioBuffer = new AudioBuffer();
 		audioBuffer.data = new UInt8Array(Bytes.alloc(0));
@@ -314,7 +315,24 @@ class AudioBuffer
 		audioBuffer.channels = info.channels;
 		audioBuffer.sampleRate = info.rate;
 		audioBuffer.bitsPerSample = 16;
-		audioBuffer.__srcVorbisFile = vorbisFile;
+
+		if (!vorbisFile.seekable() ||
+			vorbisFile.pcmTotal() < #if lime_cffi @:privateAccess lime._internal.backend.native.NativeAudioSource.STREAM_BUFFER_SAMPLES #else 0x4000 #end)
+		{
+			// convert it to static if its too short or unseekable.
+			vorbisFile.rawSeek(0);
+
+			var isBigEndian = lime.system.System.endianness == lime.system.Endian.BIG_ENDIAN;
+			var bytes:Bytes = Bytes.alloc(Std.int(haxe.Int64.toInt(vorbisFile.pcmTotal()) * info.channels * 2));
+			var total = 0, result = 0;
+			do {
+				total += (result = vorbisFile.read(bytes, total, 0x1000, isBigEndian, 2, true));
+			} while (result > 0);
+
+			audioBuffer.data = new UInt8Array(bytes);
+		}
+		else
+			audioBuffer.__srcVorbisFile = vorbisFile;
 
 		return audioBuffer;
 	}

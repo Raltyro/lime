@@ -2,7 +2,6 @@
 #include "SDLGamepad.h"
 #include "SDLJoystick.h"
 #include <system/System.h>
-#include <thread>
 #include <cmath>
 
 #ifdef HX_MACOS
@@ -170,27 +169,6 @@ namespace lime {
 		return (counter / performanceFrequency) * 1000.0;
 
 	}
-	void busyWait(double ms) {
-		const double start = getTime();
-		while (getTime() - start < ms) {
-			std::this_thread::yield();
-		}
-	}
-
-	void coolSleep(double sleepFor) {
-		double dt = 0.0;
-		double start = getTime();
-		double threshold = sleepFor - (0.9765625 * 2.2);
-
-		while ((dt = getTime() - start) < threshold)
-			SDL_Delay(1);
-		
-		double end = getTime();
-		
-		double remainder = (end - start) - dt;
-		if (remainder > 0)
-			busyWait(remainder);
-	}
 
 	void SDLApplication::HandleEvent (SDL_Event* event) {
 
@@ -214,14 +192,13 @@ namespace lime {
 					ApplicationEvent::Dispatch (&applicationEvent);
 					RenderEvent::Dispatch (&renderEvent);
 
-					double end = getTime();
-					double remainder = end - start;
-
+					double remainder = getTime() - start;
 					if (framePeriod > 0.0) {
 						double sleepDuration = framePeriod - remainder;
-						if (sleepDuration > 0)
-							coolSleep(sleepDuration);
+						if (sleepDuration > 0.0) SDL_Delay(sleepDuration);
 					}
+
+					lastUpdate = currentUpdate;
 				}
 
 				break;
@@ -404,9 +381,6 @@ namespace lime {
 
 	void SDLApplication::Init () {
 		active = true;
-		
-		double ticks = (double)SDL_GetPerformanceCounter();
-		lastUpdate = ticks;
 	}
 
 
@@ -921,23 +895,16 @@ namespace lime {
 
 
 	bool SDLApplication::Update () {
-		// i have no idea why this makes fps
-		// more consistent, but i am happy regardless.
-		lastUpdate = currentUpdate;
-		currentUpdate = getTime();
+		double current = getTime();
+		nextUpdate += current - currentUpdate;
+		currentUpdate = current;
 
-		double dt = currentUpdate - lastUpdate;
-
-		double dtLimit = framePeriod * 4;
-		if (dt > dtLimit)
-			dt = dtLimit;
-		
-		nextUpdate += dt;
-
-		if(nextUpdate >= framePeriod) {
+		if (nextUpdate > framePeriod) {
 			PushUpdate();
-			nextUpdate -= framePeriod;
+			nextUpdate = nextUpdate - framePeriod;
+			if (nextUpdate > framePeriod) nextUpdate = 0;
 		}
+
 		SDL_Event event;
 		while (SDL_PollEvent (&event)) {
 			HandleEvent (&event);
